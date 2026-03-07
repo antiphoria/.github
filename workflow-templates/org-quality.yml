@@ -1,0 +1,16 @@
+name: Org Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - $default-branch
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    uses: antiphoria/.github/.github/workflows/quality-gate.yml@main
+    with:
+      policy-ref: main

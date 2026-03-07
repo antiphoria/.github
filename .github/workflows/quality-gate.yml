@@ -1,0 +1,321 @@
+name: Global Quality Gate
+
+on:
+  workflow_call:
+    inputs:
+      policy-ref:
+        description: Ref or tag to use for shared antiphoria policy files.
+        required: false
+        type: string
+        default: main
+      python-version:
+        description: Python version for Python-specific checks.
+        required: false
+        type: string
+        default: "3.11"
+      node-version:
+        description: Node.js version for Node and Astro checks.
+        required: false
+        type: string
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_python: ${{ steps.detect.outputs.has_python }}
+      has_node: ${{ steps.detect.outputs.has_node }}
+      package_manager: ${{ steps.detect.outputs.package_manager }}
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Detect repository profile
+        id: detect
+        shell: bash
+        run: |
+          has_python=false
+          has_node=false
+          package_manager=npm
+
+          if git ls-files '*.py' | grep -q .; then
+            has_python=true
+          fi
+
+          if [ -f package.json ]; then
+            has_node=true
+          fi
+
+          if [ -f pnpm-lock.yaml ]; then
+            package_manager=pnpm
+          elif [ -f yarn.lock ]; then
+            package_manager=yarn
+          fi
+
+          echo "has_python=$has_python" >> "$GITHUB_OUTPUT"
+          echo "has_node=$has_node" >> "$GITHUB_OUTPUT"
+          echo "package_manager=$package_manager" >> "$GITHUB_OUTPUT"
+
+  trivy:
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Checkout shared policy repository
+        uses: actions/checkout@v4
+        with:
+          repository: antiphoria/.github
+          ref: ${{ inputs.policy-ref }}
+          path: .org-policy
+
+      - name: Run Trivy JSON scan
+        id: trivy_json
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          trivy-config: .org-policy/trivy.yaml
+          cache: "true"
+
+      - name: Generate Trivy HTML report
+        if: always()
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          trivy-config: .org-policy/trivy.yaml
+          format: template
+          template: "@$HOME/.local/bin/trivy-bin/contrib/html.tpl"
+          output: trivy-report.html
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Upload Trivy artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-${{ github.run_id }}
+          path: |
+            trivy-results.json
+            trivy-report.html
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce Trivy result
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.trivy_json.outcome }}" != "success" ]; then
+            echo "Trivy reported blocking findings or encountered a blocking error."
+            exit 1
+          fi
+
+  python-ruff:
+    needs: detect
+    if: needs.detect.outputs.has_python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Checkout shared policy repository
+        uses: actions/checkout@v4
+        with:
+          repository: antiphoria/.github
+          ref: ${{ inputs.policy-ref }}
+          path: .org-policy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Ruff lint
+        run: ruff check . --config .org-policy/ruff.toml
+
+      - name: Ruff format check
+        run: ruff format . --config .org-policy/ruff.toml --check
+
+  python-codeaudit:
+    needs: detect
+    if: needs.detect.outputs.has_python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install CodeAudit
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip
+          pip install codeaudit
+
+      - name: Create report directory
+        run: mkdir -p codeaudit-reports
+
+      - name: Run CodeAudit overview
+        continue-on-error: true
+        run: codeaudit overview . codeaudit-reports/overview.html
+
+      - name: Run CodeAudit filescan
+        continue-on-error: true
+        run: codeaudit filescan . codeaudit-reports/filescan.html
+
+      - name: Run CodeAudit modulescan
+        continue-on-error: true
+        run: codeaudit modulescan . codeaudit-reports/modulescan.html
+
+      - name: Upload CodeAudit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeaudit-reports-${{ github.run_id }}
+          path: codeaudit-reports
+          if-no-files-found: warn
+          retention-days: 30
+
+  node-quality:
+    needs: detect
+    if: needs.detect.outputs.has_node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            pnpm)
+              if [ -f pnpm-lock.yaml ]; then
+                pnpm install --frozen-lockfile
+              else
+                pnpm install
+              fi
+              ;;
+            yarn)
+              yarn install --immutable || yarn install --frozen-lockfile || yarn install
+              ;;
+            *)
+              if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+                npm ci
+              else
+                npm install
+              fi
+              ;;
+          esac
+
+      - name: Run lint script when present
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.lint ? 0 : 1)"; then
+            case "$PACKAGE_MANAGER" in
+              pnpm) pnpm run lint ;;
+              yarn) yarn run lint ;;
+              *) npm run lint --if-present ;;
+            esac
+          else
+            echo "No lint script defined."
+          fi
+
+      - name: Run check script when present
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.check ? 0 : 1)"; then
+            case "$PACKAGE_MANAGER" in
+              pnpm) pnpm run check ;;
+              yarn) yarn run check ;;
+              *) npm run check --if-present ;;
+            esac
+          else
+            echo "No check script defined."
+          fi
+
+      - name: Run build script when present
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.build ? 0 : 1)"; then
+            case "$PACKAGE_MANAGER" in
+              pnpm) pnpm run build ;;
+              yarn) yarn run build ;;
+              *) npm run build --if-present ;;
+            esac
+          else
+            echo "No build script defined."
+          fi
+
+  quality-gate:
+    if: always()
+    needs:
+      - detect
+      - trivy
+      - python-ruff
+      - node-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify blocking jobs
+        shell: bash
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+          PYTHON_RUFF_RESULT: ${{ needs.python-ruff.result }}
+          NODE_QUALITY_RESULT: ${{ needs.node-quality.result }}
+        run: |
+          failures=0
+
+          check_blocker() {
+            local job_name="$1"
+            local job_result="$2"
+
+            case "$job_result" in
+              success|skipped)
+                echo "$job_name: $job_result"
+                ;;
+              *)
+                echo "$job_name: $job_result"
+                failures=1
+                ;;
+            esac
+          }
+
+          check_blocker detect "$DETECT_RESULT"
+          check_blocker trivy "$TRIVY_RESULT"
+          check_blocker python-ruff "$PYTHON_RUFF_RESULT"
+          check_blocker node-quality "$NODE_QUALITY_RESULT"
+
+          if [ "$failures" -ne 0 ]; then
+            echo "The quality gate failed."
+            exit 1
+          fi

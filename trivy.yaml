@@ -1,0 +1,15 @@
+severity:
+  - HIGH
+  - CRITICAL
+
+ignore-unfixed: true
+exit-code: 1
+format: json
+output: trivy-results.json
+timeout: 10m
+
+scan:
+  scanners:
+    - vuln
+    - misconfig
+    - secret

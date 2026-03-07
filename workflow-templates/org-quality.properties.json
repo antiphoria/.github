@@ -1,0 +1,14 @@
+{
+  "name": "Antiphoria Quality Gate",
+  "description": "Calls the shared organization quality workflow for Trivy, Python, and Node or Astro checks.",
+  "iconName": "octicon shield-check",
+  "categories": [
+    "Security",
+    "Python",
+    "JavaScript"
+  ],
+  "filePatterns": [
+    "package\\.json$",
+    "\\.py$"
+  ]
+}

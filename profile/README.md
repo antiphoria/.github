@@ -1,35 +1,41 @@
-# .github
-Public organization profile of the Antinomie-Institut.
+# antiphoria
 
-# Antinomie-Institut
-*A private Art Research Project | Ein privates Kunstforschungsprojekt*
+Public organization profile for `antiphoria`.
+Personal repositories for a private, non-commercial art and research project.
 
-> **WARNING:**
-> The "Antinomie-Institut" is a **private art research project** by Georg Popp.
-> It is **not** a university, scientific authority, or incorporated legal entity under German law.
-> All software, text, and artifacts provided in this organization are artistic experiments, not commercial products or scientific advice.
+> **Notice**
+> This GitHub organization is a technical container for personal repositories maintained by Georg Popp.
+> The name `antiphoria` is used here as the artistic title of a private, non-commercial art and research project.
+> It does **not** identify a university, company, public authority, scientific institution, association, foundation, or other legal entity.
+> Nothing published here is offered as a commercial product, professional service, certification, or scientific advice.
+> No affiliation, sponsorship, endorsement, or institutional status is claimed or implied.
 
 ---
 
-## Mission
+## About
 
-The **Antinomie-Institut** operates as a landing page for code repositories exploring automated creativity, algorithmic hallucination ("slop"), and the theological implications of artificial intelligence.
+This profile collects experiments in code, text, automation, generated media, and machine-assisted creative work.
 
-Our private *research* (which means *art* in the context of the Antinomie-Institut) focuses on **overengineered nonsense**. 
+The work published here explores automated creativity, algorithmic hallucination, digital refuse, and related aesthetic or theological questions. Some repositories document process more than polished outcomes. Overengineered nonsense remains part of the method.
 
-We distinguish between human, synthetic, and hybrid origins of content.
+Where useful, we distinguish between human, synthetic, and hybrid origins of content.
 
-## Disclaimer
-We heavily rely on vibe-coding, i.e., unsupervised and unreviewed coding using large language models. While we always try to maintain a high quality standard for all software published by the Antinomie-Institut, unseen errors cannot be ruled out. They are, instead, very likely. 
+## Use of Repositories
 
-Part of the art is transparency. This code is published so others can see how it works. You are welcome to use it. The author has no objection.
+These repositories are experimental. They may be incomplete, unstable, wrong, or unsuitable for general use.
 
-Software provided in the Antinomie-Institut is not designed or validated for general use. It is built for a specific, informal artistic context. By using software of the Antinomie-Institut in any capacity you assume full responsibility for any outcomes in your own projects. The authors assume no liability.
+Many projects here rely heavily on language models and other assisted workflows. Errors, odd design choices, and unintended behavior should be expected.
 
-Unless required by applicable law, software distributed by the Antinomie-Institut is distributed "AS IS", WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+Any permission to use, copy, modify, or redistribute material depends on the license terms included in each repository. If a repository has no license, this profile does not grant one.
 
-**Contact:**
-E-Mail: `github@antinomie-institut.org`
+Software and other materials published here are provided "AS IS", without warranties or conditions of any kind, except where required by applicable law.
+
+Any use of these materials is at your own risk.
+
+## Contact
+
+Georg Popp  
+`github@antiphoria.org`
 
 ---
 

@@ -1,0 +1,39 @@
+line-length = 100
+indent-width = 4
+target-version = "py311"
+
+extend-exclude = [
+  ".venv",
+  "venv",
+  "build",
+  "dist",
+  "node_modules",
+]
+
+[lint]
+select = [
+  "E4",
+  "E7",
+  "E9",
+  "F",
+  "B",
+  "UP",
+  "I",
+  "SIM",
+  "A",
+  "S",
+]
+ignore = [
+  "E203",
+  "W503",
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+"**/tests/**/*.py" = ["S101"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
