@@ -1,0 +1,7 @@
+# Reference copy only.
+# Canonical executable workflow:
+#   .github/workflows/quality-gate.yml
+#
+# Keep all functional changes in the canonical file above.
+# This reference file exists only to make the org-level quality gate easy to
+# spot while browsing the repository outside the GitHub Actions workflow path.
