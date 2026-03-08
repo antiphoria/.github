@@ -1,8 +1,4 @@
-severity:
-  - HIGH
-  - CRITICAL
-
-ignore-unfixed: true
+ignore-unfixed: false
 exit-code: 1
 format: json
 output: trivy-results.json
@@ -13,3 +9,4 @@ scan:
     - vuln
     - misconfig
     - secret
+    - license

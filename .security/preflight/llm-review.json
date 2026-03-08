@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "repository": ".github",
+  "reviewed_at_utc": "2026-03-07T00:00:00Z",
+  "reviewer": "georg-popp",
+  "status": "acknowledged",
+  "notes": "Initial local preflight evidence file required by central quality gate."
+}

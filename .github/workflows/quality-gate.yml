@@ -3,21 +3,46 @@ name: Global Quality Gate
 on:
   workflow_call:
     inputs:
-      policy-ref:
+      policy_ref:
         description: Ref or tag to use for shared antiphoria policy files.
         required: false
         type: string
         default: main
-      python-version:
+      python_version:
         description: Python version for Python-specific checks.
         required: false
         type: string
         default: "3.11"
-      node-version:
+      node_version:
         description: Node.js version for Node and Astro checks.
         required: false
         type: string
         default: "20"
+      strict_mode:
+        description: Fail on any finding where feasible.
+        required: false
+        type: boolean
+        default: true
+      require_local_preflight:
+        description: Require committed local preflight reports.
+        required: false
+        type: boolean
+        default: true
+      local_preflight_human_path:
+        description: Path to local human preflight review markdown.
+        required: false
+        type: string
+        default: .security/preflight/human-review.md
+      local_preflight_llm_path:
+        description: Path to local machine-readable preflight report JSON.
+        required: false
+        type: string
+        default: .security/preflight/llm-review.json
+      web_audit_url:
+        description: Publicly reachable URL for web DAST. Leave empty to scan local preview.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -28,7 +53,12 @@ jobs:
     outputs:
       has_python: ${{ steps.detect.outputs.has_python }}
       has_node: ${{ steps.detect.outputs.has_node }}
+      has_web: ${{ steps.detect.outputs.has_web }}
       package_manager: ${{ steps.detect.outputs.package_manager }}
+      has_lint_script: ${{ steps.detect.outputs.has_lint_script }}
+      has_check_script: ${{ steps.detect.outputs.has_check_script }}
+      has_build_script: ${{ steps.detect.outputs.has_build_script }}
+      has_preview_script: ${{ steps.detect.outputs.has_preview_script }}
     steps:
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -39,7 +69,12 @@ jobs:
         run: |
           has_python=false
           has_node=false
+          has_web=false
           package_manager=npm
+          has_lint_script=false
+          has_check_script=false
+          has_build_script=false
+          has_preview_script=false
 
           if git ls-files '*.py' | grep -q .; then
             has_python=true
@@ -55,9 +90,82 @@ jobs:
             package_manager=yarn
           fi
 
+          if [ "$has_node" = "true" ]; then
+            if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.lint ? 0 : 1)"; then
+              has_lint_script=true
+            fi
+            if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.check ? 0 : 1)"; then
+              has_check_script=true
+            fi
+            if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.build ? 0 : 1)"; then
+              has_build_script=true
+            fi
+            if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.preview ? 0 : 1)"; then
+              has_preview_script=true
+            fi
+
+            if [ -f astro.config.mjs ] || [ -f astro.config.ts ] || [ -f astro.config.js ]; then
+              has_web=true
+            fi
+
+            if [ "$has_preview_script" = "true" ]; then
+              has_web=true
+            fi
+
+            if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && (pkg.scripts.dev || pkg.scripts.start) ? 0 : 1)"; then
+              has_web=true
+            fi
+          fi
+
           echo "has_python=$has_python" >> "$GITHUB_OUTPUT"
           echo "has_node=$has_node" >> "$GITHUB_OUTPUT"
+          echo "has_web=$has_web" >> "$GITHUB_OUTPUT"
           echo "package_manager=$package_manager" >> "$GITHUB_OUTPUT"
+          echo "has_lint_script=$has_lint_script" >> "$GITHUB_OUTPUT"
+          echo "has_check_script=$has_check_script" >> "$GITHUB_OUTPUT"
+          echo "has_build_script=$has_build_script" >> "$GITHUB_OUTPUT"
+          echo "has_preview_script=$has_preview_script" >> "$GITHUB_OUTPUT"
+
+  preflight-reports:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Validate local preflight reports
+        shell: bash
+        env:
+          REQUIRE_PREFLIGHT: ${{ inputs.require_local_preflight }}
+          HUMAN_REPORT: ${{ inputs.local_preflight_human_path }}
+          LLM_REPORT: ${{ inputs.local_preflight_llm_path }}
+        run: |
+          if [ "$REQUIRE_PREFLIGHT" != "true" ]; then
+            echo "Local preflight requirement disabled."
+            exit 0
+          fi
+
+          missing=0
+          for report in "$HUMAN_REPORT" "$LLM_REPORT"; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing preflight report::Required report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload local preflight evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-preflight-${{ github.run_id }}
+          path: |
+            ${{ inputs.local_preflight_human_path }}
+            ${{ inputs.local_preflight_llm_path }}
+          if-no-files-found: warn
+          retention-days: 30
 
   trivy:
     needs: detect
@@ -70,8 +178,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antiphoria/.github
-          ref: ${{ inputs.policy-ref }}
+          ref: ${{ inputs.policy_ref }}
           path: .org-policy
+
+      - name: Resolve Trivy severity policy
+        id: trivy_policy
+        shell: bash
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
+        run: |
+          if [ "$STRICT_MODE" = "true" ]; then
+            echo "severity_list=UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL" >> "$GITHUB_OUTPUT"
+          else
+            echo "severity_list=HIGH,CRITICAL" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run Trivy JSON scan
         id: trivy_json
@@ -81,6 +201,8 @@ jobs:
           scan-type: fs
           scan-ref: .
           trivy-config: .org-policy/trivy.yaml
+          scanners: vuln,misconfig,secret,license
+          severity: ${{ steps.trivy_policy.outputs.severity_list }}
           cache: "true"
 
       - name: Generate Trivy HTML report
@@ -90,11 +212,28 @@ jobs:
           scan-type: fs
           scan-ref: .
           trivy-config: .org-policy/trivy.yaml
+          scanners: vuln,misconfig,secret,license
+          severity: ${{ steps.trivy_policy.outputs.severity_list }}
           format: template
           template: "@$HOME/.local/bin/trivy-bin/contrib/html.tpl"
           output: trivy-report.html
           exit-code: "0"
           skip-setup-trivy: true
+
+      - name: Verify Trivy reports
+        if: always()
+        shell: bash
+        run: |
+          missing=0
+          for report in trivy-results.json trivy-report.html; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing Trivy report::Report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Upload Trivy artifacts
         if: always()
@@ -128,24 +267,122 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antiphoria/.github
-          ref: ${{ inputs.policy-ref }}
+          ref: ${{ inputs.policy_ref }}
           path: .org-policy
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python-version }}
+          python-version: ${{ inputs.python_version }}
 
       - name: Install Ruff
         run: |
           python -m pip install --upgrade pip
           pip install ruff
 
-      - name: Ruff lint
-        run: ruff check . --config .org-policy/ruff.toml
+      - name: Prepare report directories
+        run: mkdir -p reports/human reports/llm
+
+      - name: Ruff lint JSON report
+        id: ruff_check
+        continue-on-error: true
+        run: ruff check . --config .org-policy/ruff.toml --output-format json > reports/llm/ruff-findings.json
+
+      - name: Ruff lint human summary
+        if: always()
+        shell: bash
+        env:
+          RUFF_OUTCOME: ${{ steps.ruff_check.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          findings_path = Path("reports/llm/ruff-findings.json")
+          summary_path = Path("reports/llm/ruff-summary.json")
+          human_path = Path("reports/human/ruff-summary.md")
+
+          findings = []
+          parse_error = None
+
+          if findings_path.exists() and findings_path.stat().st_size > 0:
+            try:
+              findings = json.loads(findings_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+              parse_error = str(exc)
+
+          code_counts = {}
+          for finding in findings if isinstance(findings, list) else []:
+            code = finding.get("code", "UNKNOWN")
+            code_counts[code] = code_counts.get(code, 0) + 1
+
+          summary = {
+            "tool": "ruff",
+            "finding_count": len(findings) if isinstance(findings, list) else 0,
+            "parse_error": parse_error,
+            "outcome": os.environ.get("RUFF_OUTCOME", "unknown"),
+            "code_counts": code_counts,
+          }
+
+          summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+          lines = [
+            "# Ruff Summary",
+            "",
+            f"- Outcome: `{summary['outcome']}`",
+            f"- Findings: `{summary['finding_count']}`",
+          ]
+          if parse_error:
+            lines.append(f"- Parse error: `{parse_error}`")
+          if code_counts:
+            lines.append("")
+            lines.append("## Top Rule Hits")
+            for code, count in sorted(code_counts.items(), key=lambda item: item[1], reverse=True)[:20]:
+              lines.append(f"- `{code}`: {count}")
+
+          human_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
 
       - name: Ruff format check
-        run: ruff format . --config .org-policy/ruff.toml --check
+        id: ruff_format
+        continue-on-error: true
+        shell: bash
+        run: |
+          ruff format . --config .org-policy/ruff.toml --check 2>&1 | tee reports/human/ruff-format.txt
+
+      - name: Verify Ruff reports
+        if: always()
+        shell: bash
+        run: |
+          missing=0
+          for report in reports/llm/ruff-findings.json reports/llm/ruff-summary.json reports/human/ruff-summary.md reports/human/ruff-format.txt; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing Ruff report::Report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload Ruff artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruff-reports-${{ github.run_id }}
+          path: reports
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce Ruff result
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.ruff_check.outcome }}" != "success" ] || [ "${{ steps.ruff_format.outcome }}" != "success" ]; then
+            echo "Ruff checks failed."
+            exit 1
+          fi
 
   python-test:
     needs: detect
@@ -158,23 +395,94 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python-version }}
+          python-version: ${{ inputs.python_version }}
 
       - name: Install project and dependencies
-        shell: bash
         run: |
           python -m pip install --upgrade pip
           if [ -f setup.py ] || [ -f pyproject.toml ]; then
             pip install -e .
           fi
 
-      - name: Run unit tests (if tests directory exists)
+      - name: Prepare report directories
+        run: mkdir -p reports/human reports/llm
+
+      - name: Run unit tests and capture output
+        id: python_tests
         shell: bash
         run: |
+          set +e
           if [ -d tests ]; then
-            python -m unittest discover -s tests
+            python -m unittest discover -s tests 2>&1 | tee reports/human/python-tests.txt
+            test_status=${PIPESTATUS[0]}
+            has_tests=true
           else
-            echo "No tests/ directory found. Skipping."
+            echo "No tests/ directory found. Skipping." | tee reports/human/python-tests.txt
+            test_status=0
+            has_tests=false
+          fi
+          echo "test_status=$test_status" >> "$GITHUB_OUTPUT"
+          echo "has_tests=$has_tests" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write test summary JSON
+        shell: bash
+        env:
+          TEST_STATUS: ${{ steps.python_tests.outputs.test_status }}
+          HAS_TESTS: ${{ steps.python_tests.outputs.has_tests }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary = {
+            "tool": "unittest",
+            "has_tests": os.environ.get("HAS_TESTS", "false") == "true",
+            "test_status": int(os.environ.get("TEST_STATUS", "1")),
+          }
+          summary["result"] = "pass" if summary["test_status"] == 0 else "fail"
+          Path("reports/llm/python-tests-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+          PY
+
+      - name: Verify test reports
+        shell: bash
+        run: |
+          missing=0
+          for report in reports/human/python-tests.txt reports/llm/python-tests-summary.json; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing test report::Report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload Python test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-tests-${{ github.run_id }}
+          path: reports
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce test policy
+        shell: bash
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
+          TEST_STATUS: ${{ steps.python_tests.outputs.test_status }}
+          HAS_TESTS: ${{ steps.python_tests.outputs.has_tests }}
+        run: |
+          if [ "$TEST_STATUS" != "0" ]; then
+            echo "Python tests failed."
+            exit 1
+          fi
+
+          if [ "$STRICT_MODE" = "true" ] && [ "$HAS_TESTS" != "true" ]; then
+            echo "Strict mode requires a tests/ directory for Python repositories."
+            exit 1
           fi
 
   python-codeaudit:
@@ -188,37 +496,170 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python-version }}
+          python-version: ${{ inputs.python_version }}
+
+      - name: Prepare report directories
+        run: mkdir -p codeaudit-reports reports/human reports/llm
 
       - name: Install CodeAudit
+        id: codeaudit_install
         continue-on-error: true
         run: |
           python -m pip install --upgrade pip
           pip install codeaudit
 
-      - name: Create report directory
-        run: mkdir -p codeaudit-reports
-
       - name: Run CodeAudit overview
+        id: codeaudit_overview
         continue-on-error: true
         run: codeaudit overview . codeaudit-reports/overview.html
 
       - name: Run CodeAudit filescan
+        id: codeaudit_filescan
         continue-on-error: true
         run: codeaudit filescan . codeaudit-reports/filescan.html
 
       - name: Run CodeAudit modulescan
+        id: codeaudit_modulescan
         continue-on-error: true
         run: codeaudit modulescan . codeaudit-reports/modulescan.html
+
+      - name: Evaluate CodeAudit findings
+        id: codeaudit_eval
+        shell: bash
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
+          INSTALL_OUTCOME: ${{ steps.codeaudit_install.outcome }}
+          OVERVIEW_OUTCOME: ${{ steps.codeaudit_overview.outcome }}
+          FILESCAN_OUTCOME: ${{ steps.codeaudit_filescan.outcome }}
+          MODULESCAN_OUTCOME: ${{ steps.codeaudit_modulescan.outcome }}
+        run: |
+          block="$(python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          strict = os.environ.get("STRICT_MODE", "false") == "true"
+          outcomes = {
+            "install": os.environ.get("INSTALL_OUTCOME", "failure"),
+            "overview": os.environ.get("OVERVIEW_OUTCOME", "failure"),
+            "filescan": os.environ.get("FILESCAN_OUTCOME", "failure"),
+            "modulescan": os.environ.get("MODULESCAN_OUTCOME", "failure"),
+          }
+
+          reasons = []
+          block = False
+
+          if outcomes["install"] != "success":
+            block = True
+            reasons.append("CodeAudit installation failed.")
+
+          filescan_path = Path("codeaudit-reports/filescan.html")
+          findings_count = None
+          parse_mode = "unknown"
+
+          if filescan_path.exists() and filescan_path.stat().st_size > 0:
+            text = filescan_path.read_text(encoding="utf-8", errors="ignore").lower()
+            patterns = [
+              r"potential security weaknesses[^0-9]*(\\d+)",
+              r"security issues[^0-9]*(\\d+)",
+              r"vulnerabilities[^0-9]*(\\d+)",
+              r"findings[^0-9]*(\\d+)",
+            ]
+            counts = []
+            for pattern in patterns:
+              counts.extend(int(match) for match in re.findall(pattern, text))
+
+            if counts:
+              findings_count = max(counts)
+              parse_mode = "regex_count"
+            else:
+              parse_mode = "no_numeric_marker"
+          else:
+            parse_mode = "filescan_missing"
+
+          if outcomes["filescan"] != "success":
+            block = True
+            reasons.append("CodeAudit filescan execution failed.")
+
+          if findings_count is None:
+            if strict:
+              block = True
+              reasons.append("Strict mode requires parseable CodeAudit finding counts.")
+          elif findings_count > 0:
+            block = True
+            reasons.append(f"CodeAudit reported findings ({findings_count}).")
+
+          summary = {
+            "tool": "codeaudit",
+            "strict_mode": strict,
+            "outcomes": outcomes,
+            "parse_mode": parse_mode,
+            "finding_count_estimate": findings_count,
+            "block": block,
+            "reasons": reasons,
+          }
+
+          Path("reports/llm/codeaudit-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+          lines = [
+            "# CodeAudit Summary",
+            "",
+            f"- Strict mode: `{strict}`",
+            f"- Install outcome: `{outcomes['install']}`",
+            f"- Overview outcome: `{outcomes['overview']}`",
+            f"- Filescan outcome: `{outcomes['filescan']}`",
+            f"- Modulescan outcome: `{outcomes['modulescan']}`",
+            f"- Parse mode: `{parse_mode}`",
+            f"- Finding count estimate: `{findings_count if findings_count is not None else 'unknown'}`",
+            f"- Blocking decision: `{block}`",
+          ]
+          if reasons:
+            lines.append("")
+            lines.append("## Reasons")
+            for reason in reasons:
+              lines.append(f"- {reason}")
+          Path("reports/human/codeaudit-summary.md").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
+          print("true" if block else "false")
+          PY
+          )"
+          echo "block=$block" >> "$GITHUB_OUTPUT"
+
+      - name: Verify CodeAudit reports
+        if: always()
+        shell: bash
+        run: |
+          missing=0
+          for report in codeaudit-reports/overview.html codeaudit-reports/filescan.html codeaudit-reports/modulescan.html reports/human/codeaudit-summary.md reports/llm/codeaudit-summary.json; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing CodeAudit report::Report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Upload CodeAudit artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: codeaudit-reports-${{ github.run_id }}
-          path: codeaudit-reports
+          path: |
+            codeaudit-reports
+            reports
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Enforce CodeAudit policy
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.codeaudit_eval.outputs.block }}" = "true" ]; then
+            echo "CodeAudit blocking policy triggered."
+            exit 1
+          fi
 
   node-quality:
     needs: detect
@@ -231,12 +672,35 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ inputs.node_version }}
 
       - name: Enable Corepack
         run: corepack enable
 
+      - name: Prepare report directories
+        run: mkdir -p reports/human reports/llm
+
+      - name: Detect Node security profile
+        id: node_profile
+        shell: bash
+        run: |
+          has_eslint_config=false
+          for cfg in eslint.config.js eslint.config.mjs eslint.config.cjs .eslintrc .eslintrc.js .eslintrc.cjs .eslintrc.json .eslintrc.yaml .eslintrc.yml; do
+            if [ -f "$cfg" ]; then
+              has_eslint_config=true
+              break
+            fi
+          done
+
+          if node -e "const pkg=require('./package.json'); process.exit(pkg.eslintConfig ? 0 : 1)"; then
+            has_eslint_config=true
+          fi
+
+          echo "has_eslint_config=$has_eslint_config" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
+        id: node_install
+        continue-on-error: true
         shell: bash
         env:
           PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
@@ -261,69 +725,605 @@ jobs:
               ;;
           esac
 
-      - name: Run lint script when present
+      - name: Run lint script
+        id: node_lint
+        if: needs.detect.outputs.has_lint_script == 'true'
+        continue-on-error: true
         shell: bash
         env:
           PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
         run: |
-          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.lint ? 0 : 1)"; then
-            case "$PACKAGE_MANAGER" in
-              pnpm) pnpm run lint ;;
-              yarn) yarn run lint ;;
-              *) npm run lint --if-present ;;
-            esac
-          else
-            echo "No lint script defined."
+          set -o pipefail
+          case "$PACKAGE_MANAGER" in
+            pnpm) pnpm run lint 2>&1 | tee reports/human/node-lint.txt ;;
+            yarn) yarn run lint 2>&1 | tee reports/human/node-lint.txt ;;
+            *) npm run lint --if-present 2>&1 | tee reports/human/node-lint.txt ;;
+          esac
+
+      - name: Record lint script skip
+        if: needs.detect.outputs.has_lint_script != 'true'
+        run: echo "No lint script defined." > reports/human/node-lint.txt
+
+      - name: Run check script
+        id: node_check
+        if: needs.detect.outputs.has_check_script == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          set -o pipefail
+          case "$PACKAGE_MANAGER" in
+            pnpm) pnpm run check 2>&1 | tee reports/human/node-check.txt ;;
+            yarn) yarn run check 2>&1 | tee reports/human/node-check.txt ;;
+            *) npm run check --if-present 2>&1 | tee reports/human/node-check.txt ;;
+          esac
+
+      - name: Record check script skip
+        if: needs.detect.outputs.has_check_script != 'true'
+        run: echo "No check script defined." > reports/human/node-check.txt
+
+      - name: Run build script
+        id: node_build
+        if: needs.detect.outputs.has_build_script == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          set -o pipefail
+          case "$PACKAGE_MANAGER" in
+            pnpm) pnpm run build 2>&1 | tee reports/human/node-build.txt ;;
+            yarn) yarn run build 2>&1 | tee reports/human/node-build.txt ;;
+            *) npm run build --if-present 2>&1 | tee reports/human/node-build.txt ;;
+          esac
+
+      - name: Record build script skip
+        if: needs.detect.outputs.has_build_script != 'true'
+        run: echo "No build script defined." > reports/human/node-build.txt
+
+      - name: Run ESLint security checks
+        id: eslint_scan
+        if: steps.node_profile.outputs.has_eslint_config == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          npx --no-install eslint . --max-warnings=0 -f json -o reports/llm/eslint-findings.json
+          json_exit=$?
+          npx --no-install eslint . --max-warnings=0 -f stylish > reports/human/eslint.txt
+          text_exit=$?
+          if [ "$json_exit" -ne 0 ] || [ "$text_exit" -ne 0 ]; then
+            exit 1
           fi
 
-      - name: Run check script when present
+      - name: Record ESLint skip
+        if: steps.node_profile.outputs.has_eslint_config != 'true'
+        run: |
+          echo "No ESLint configuration detected." > reports/human/eslint.txt
+          echo "[]" > reports/llm/eslint-findings.json
+
+      - name: Run dependency audit
+        id: dep_audit
+        continue-on-error: true
         shell: bash
         env:
           PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
         run: |
-          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.check ? 0 : 1)"; then
-            case "$PACKAGE_MANAGER" in
-              pnpm) pnpm run check ;;
-              yarn) yarn run check ;;
-              *) npm run check --if-present ;;
-            esac
-          else
-            echo "No check script defined."
+          set +e
+          case "$PACKAGE_MANAGER" in
+            pnpm)
+              pnpm audit --json > reports/llm/dependency-audit.json 2> reports/human/dependency-audit.stderr.txt
+              audit_exit=$?
+              ;;
+            yarn)
+              yarn npm audit --json > reports/llm/dependency-audit.json 2> reports/human/dependency-audit.stderr.txt
+              audit_exit=$?
+              ;;
+            *)
+              npm audit --json > reports/llm/dependency-audit.json 2> reports/human/dependency-audit.stderr.txt
+              audit_exit=$?
+              ;;
+          esac
+
+          if [ ! -s reports/llm/dependency-audit.json ]; then
+            echo '{"error":"Dependency audit JSON not generated."}' > reports/llm/dependency-audit.json
           fi
 
-      - name: Run build script when present
+          exit "$audit_exit"
+
+      - name: Evaluate Node findings
+        id: node_eval
+        shell: bash
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
+          HAS_LINT: ${{ needs.detect.outputs.has_lint_script }}
+          HAS_CHECK: ${{ needs.detect.outputs.has_check_script }}
+          HAS_BUILD: ${{ needs.detect.outputs.has_build_script }}
+          HAS_ESLINT_CONFIG: ${{ steps.node_profile.outputs.has_eslint_config }}
+          NODE_INSTALL_OUTCOME: ${{ steps.node_install.outcome }}
+          NODE_LINT_OUTCOME: ${{ steps.node_lint.outcome }}
+          NODE_CHECK_OUTCOME: ${{ steps.node_check.outcome }}
+          NODE_BUILD_OUTCOME: ${{ steps.node_build.outcome }}
+          ESLINT_OUTCOME: ${{ steps.eslint_scan.outcome }}
+          DEP_AUDIT_OUTCOME: ${{ steps.dep_audit.outcome }}
+        run: |
+          block="$(python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          strict = os.environ.get("STRICT_MODE", "false") == "true"
+          has_lint = os.environ.get("HAS_LINT", "false") == "true"
+          has_check = os.environ.get("HAS_CHECK", "false") == "true"
+          has_build = os.environ.get("HAS_BUILD", "false") == "true"
+          has_eslint = os.environ.get("HAS_ESLINT_CONFIG", "false") == "true"
+
+          outcomes = {
+            "install": os.environ.get("NODE_INSTALL_OUTCOME", "failure"),
+            "lint": os.environ.get("NODE_LINT_OUTCOME", "skipped"),
+            "check": os.environ.get("NODE_CHECK_OUTCOME", "skipped"),
+            "build": os.environ.get("NODE_BUILD_OUTCOME", "skipped"),
+            "eslint": os.environ.get("ESLINT_OUTCOME", "skipped"),
+            "dep_audit": os.environ.get("DEP_AUDIT_OUTCOME", "failure"),
+          }
+
+          reasons = []
+          block = False
+
+          if outcomes["install"] != "success":
+            block = True
+            reasons.append("Dependency installation failed.")
+
+          if has_lint and outcomes["lint"] != "success":
+            block = True
+            reasons.append("Lint script failed.")
+          if has_check and outcomes["check"] != "success":
+            block = True
+            reasons.append("Check script failed.")
+          if has_build and outcomes["build"] != "success":
+            block = True
+            reasons.append("Build script failed.")
+
+          if strict and not has_lint:
+            block = True
+            reasons.append("Strict mode requires a lint script for Node projects.")
+
+          if strict and not has_eslint:
+            block = True
+            reasons.append("Strict mode requires ESLint configuration.")
+
+          if has_eslint and outcomes["eslint"] != "success":
+            block = True
+            reasons.append("ESLint security check failed.")
+
+          audit_counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0, "info": 0}
+          audit_parse_error = None
+          audit_path = Path("reports/llm/dependency-audit.json")
+
+          if audit_path.exists() and audit_path.stat().st_size > 0:
+            try:
+              data = json.loads(audit_path.read_text(encoding="utf-8", errors="ignore"))
+              metadata = data.get("metadata", {}).get("vulnerabilities", {})
+              if isinstance(metadata, dict) and metadata:
+                for key in audit_counts:
+                  value = metadata.get(key, 0)
+                  try:
+                    audit_counts[key] = int(value)
+                  except Exception:
+                    audit_counts[key] = 0
+              elif isinstance(data.get("vulnerabilities"), dict):
+                for vuln in data["vulnerabilities"].values():
+                  sev = str(vuln.get("severity", "")).lower()
+                  if sev in audit_counts:
+                    audit_counts[sev] += 1
+            except Exception as exc:
+              audit_parse_error = str(exc)
+          else:
+            audit_parse_error = "dependency-audit.json missing or empty"
+
+          total_findings = sum(audit_counts.values())
+          high_critical = audit_counts["high"] + audit_counts["critical"]
+
+          if audit_parse_error:
+            if strict:
+              block = True
+              reasons.append("Strict mode requires parseable dependency audit JSON.")
+          else:
+            if strict and total_findings > 0:
+              block = True
+              reasons.append(f"Dependency audit findings detected ({total_findings}).")
+            if (not strict) and high_critical > 0:
+              block = True
+              reasons.append(f"High/Critical dependency findings detected ({high_critical}).")
+
+          summary = {
+            "tool": "node-quality",
+            "strict_mode": strict,
+            "has_lint_script": has_lint,
+            "has_check_script": has_check,
+            "has_build_script": has_build,
+            "has_eslint_config": has_eslint,
+            "outcomes": outcomes,
+            "dependency_audit_counts": audit_counts,
+            "dependency_audit_parse_error": audit_parse_error,
+            "block": block,
+            "reasons": reasons,
+          }
+
+          Path("reports/llm/node-quality-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+          lines = [
+            "# Node Quality Summary",
+            "",
+            f"- Strict mode: `{strict}`",
+            f"- Install outcome: `{outcomes['install']}`",
+            f"- Lint outcome: `{outcomes['lint']}`",
+            f"- Check outcome: `{outcomes['check']}`",
+            f"- Build outcome: `{outcomes['build']}`",
+            f"- ESLint outcome: `{outcomes['eslint']}`",
+            f"- Dependency audit outcome: `{outcomes['dep_audit']}`",
+            f"- Dependency findings total: `{total_findings}`",
+            f"- High/Critical findings: `{high_critical}`",
+            f"- Blocking decision: `{block}`",
+          ]
+          if audit_parse_error:
+            lines.append(f"- Dependency audit parse error: `{audit_parse_error}`")
+          if reasons:
+            lines.append("")
+            lines.append("## Reasons")
+            for reason in reasons:
+              lines.append(f"- {reason}")
+          Path("reports/human/node-quality-summary.md").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
+          print("true" if block else "false")
+          PY
+          )"
+          echo "block=$block" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Node reports
+        if: always()
+        shell: bash
+        run: |
+          missing=0
+          for report in reports/human/node-lint.txt reports/human/node-check.txt reports/human/node-build.txt reports/human/eslint.txt reports/human/node-quality-summary.md reports/llm/eslint-findings.json reports/llm/dependency-audit.json reports/llm/node-quality-summary.json; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing Node report::Report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload Node artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-quality-${{ github.run_id }}
+          path: reports
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce Node policy
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.node_eval.outputs.block }}" = "true" ]; then
+            echo "Node quality blocking policy triggered."
+            exit 1
+          fi
+
+  web-dast:
+    needs: detect
+    if: needs.detect.outputs.has_web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+
+      - name: Checkout shared policy repository
+        uses: actions/checkout@v4
+        with:
+          repository: antiphoria/.github
+          ref: ${{ inputs.policy_ref }}
+          path: .org-policy
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Prepare report directories
+        run: mkdir -p reports/human reports/llm
+
+      - name: Install dependencies
+        id: web_install
+        continue-on-error: true
         shell: bash
         env:
           PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
         run: |
-          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.build ? 0 : 1)"; then
+          case "$PACKAGE_MANAGER" in
+            pnpm)
+              if [ -f pnpm-lock.yaml ]; then
+                pnpm install --frozen-lockfile
+              else
+                pnpm install
+              fi
+              ;;
+            yarn)
+              yarn install --immutable || yarn install --frozen-lockfile || yarn install
+              ;;
+            *)
+              if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+                npm ci
+              else
+                npm install
+              fi
+              ;;
+          esac
+
+      - name: Resolve target URL
+        id: web_target
+        shell: bash
+        env:
+          PROVIDED_URL: ${{ inputs.web_audit_url }}
+        run: |
+          if [ -n "$PROVIDED_URL" ]; then
+            echo "target_url=$PROVIDED_URL" >> "$GITHUB_OUTPUT"
+            echo "use_local_preview=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "target_url=http://127.0.0.1:4173" >> "$GITHUB_OUTPUT"
+            echo "use_local_preview=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start local preview server
+        id: web_preview
+        if: steps.web_target.outputs.use_local_preview == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          PACKAGE_MANAGER: ${{ needs.detect.outputs.package_manager }}
+        run: |
+          set -e
+          if node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.preview ? 0 : 1)"; then
             case "$PACKAGE_MANAGER" in
-              pnpm) pnpm run build ;;
-              yarn) yarn run build ;;
-              *) npm run build --if-present ;;
+              pnpm) pnpm run preview -- --host 127.0.0.1 --port 4173 > reports/human/web-preview.log 2>&1 & ;;
+              yarn) yarn run preview -- --host 127.0.0.1 --port 4173 > reports/human/web-preview.log 2>&1 & ;;
+              *) npm run preview -- --host 127.0.0.1 --port 4173 > reports/human/web-preview.log 2>&1 & ;;
+            esac
+          elif node -e "const pkg=require('./package.json'); process.exit(pkg.scripts && pkg.scripts.start ? 0 : 1)"; then
+            case "$PACKAGE_MANAGER" in
+              pnpm) PORT=4173 HOST=127.0.0.1 pnpm run start > reports/human/web-preview.log 2>&1 & ;;
+              yarn) PORT=4173 HOST=127.0.0.1 yarn run start > reports/human/web-preview.log 2>&1 & ;;
+              *) PORT=4173 HOST=127.0.0.1 npm run start > reports/human/web-preview.log 2>&1 & ;;
             esac
           else
-            echo "No build script defined."
+            echo "No preview/start script available for local web audit." > reports/human/web-preview.log
+            exit 1
+          fi
+          echo "server_pid=$!" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for local preview server
+        id: web_wait
+        if: steps.web_target.outputs.use_local_preview == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          for _ in $(seq 1 40); do
+            if curl -fsS "${{ steps.web_target.outputs.target_url }}" > /dev/null; then
+              echo "ready=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Run OWASP ZAP baseline scan
+        id: web_zap
+        continue-on-error: true
+        shell: bash
+        run: |
+          docker run --rm --network host -v "${PWD}:/zap/wrk/:rw" ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t "${{ steps.web_target.outputs.target_url }}" \
+            -m 5 \
+            -r reports/human/zap-report.html \
+            -w reports/human/zap-report.md \
+            -J reports/llm/zap-report.json \
+            -x reports/llm/zap-report.xml
+
+      - name: Stop local preview server
+        if: always() && steps.web_target.outputs.use_local_preview == 'true' && steps.web_preview.outputs.server_pid != ''
+        shell: bash
+        run: |
+          kill "${{ steps.web_preview.outputs.server_pid }}" || true
+
+      - name: Evaluate web DAST findings
+        id: web_eval
+        shell: bash
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
+          USE_LOCAL_PREVIEW: ${{ steps.web_target.outputs.use_local_preview }}
+          WEB_INSTALL_OUTCOME: ${{ steps.web_install.outcome }}
+          WEB_PREVIEW_OUTCOME: ${{ steps.web_preview.outcome }}
+          WEB_WAIT_OUTCOME: ${{ steps.web_wait.outcome }}
+          WEB_ZAP_OUTCOME: ${{ steps.web_zap.outcome }}
+        run: |
+          block="$(python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          strict = os.environ.get("STRICT_MODE", "false") == "true"
+          use_local_preview = os.environ.get("USE_LOCAL_PREVIEW", "false") == "true"
+          outcomes = {
+            "install": os.environ.get("WEB_INSTALL_OUTCOME", "failure"),
+            "preview": os.environ.get("WEB_PREVIEW_OUTCOME", "skipped"),
+            "wait": os.environ.get("WEB_WAIT_OUTCOME", "skipped"),
+            "zap": os.environ.get("WEB_ZAP_OUTCOME", "failure"),
+          }
+
+          reasons = []
+          block = False
+
+          if outcomes["install"] != "success":
+            block = True
+            reasons.append("Web dependency installation failed.")
+
+          if use_local_preview:
+            if outcomes["preview"] != "success":
+              block = True
+              reasons.append("Local preview server failed to start.")
+            if outcomes["wait"] != "success":
+              block = True
+              reasons.append("Local preview server was not reachable.")
+
+          zap_path = Path("reports/llm/zap-report.json")
+          risk_counts = {"info": 0, "low": 0, "medium": 0, "high": 0}
+          parse_error = None
+
+          if zap_path.exists() and zap_path.stat().st_size > 0:
+            try:
+              data = json.loads(zap_path.read_text(encoding="utf-8", errors="ignore"))
+              for site in data.get("site", []):
+                for alert in site.get("alerts", []):
+                  try:
+                    risk_code = int(alert.get("riskcode", 0))
+                  except Exception:
+                    risk_code = 0
+                  if risk_code >= 3:
+                    risk_counts["high"] += 1
+                  elif risk_code == 2:
+                    risk_counts["medium"] += 1
+                  elif risk_code == 1:
+                    risk_counts["low"] += 1
+                  else:
+                    risk_counts["info"] += 1
+            except Exception as exc:
+              parse_error = str(exc)
+          else:
+            parse_error = "ZAP JSON report missing or empty"
+
+          total_alerts = sum(risk_counts.values())
+
+          if parse_error:
+            block = True
+            reasons.append("Unable to parse ZAP JSON report.")
+          else:
+            if strict and total_alerts > 0:
+              block = True
+              reasons.append(f"Strict mode blocks on any ZAP alert ({total_alerts}).")
+            if (not strict) and risk_counts["high"] > 0:
+              block = True
+              reasons.append(f"High ZAP alerts detected ({risk_counts['high']}).")
+
+          summary = {
+            "tool": "zap-baseline",
+            "strict_mode": strict,
+            "use_local_preview": use_local_preview,
+            "outcomes": outcomes,
+            "risk_counts": risk_counts,
+            "total_alerts": total_alerts,
+            "parse_error": parse_error,
+            "block": block,
+            "reasons": reasons,
+          }
+
+          Path("reports/llm/web-audit-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+          lines = [
+            "# Web DAST Summary",
+            "",
+            f"- Strict mode: `{strict}`",
+            f"- Local preview mode: `{use_local_preview}`",
+            f"- Install outcome: `{outcomes['install']}`",
+            f"- Preview outcome: `{outcomes['preview']}`",
+            f"- Reachability outcome: `{outcomes['wait']}`",
+            f"- ZAP step outcome: `{outcomes['zap']}`",
+            f"- Alerts total: `{total_alerts}`",
+            f"- High alerts: `{risk_counts['high']}`",
+            f"- Medium alerts: `{risk_counts['medium']}`",
+            f"- Low alerts: `{risk_counts['low']}`",
+            f"- Info alerts: `{risk_counts['info']}`",
+            f"- Blocking decision: `{block}`",
+          ]
+          if parse_error:
+            lines.append(f"- Parse error: `{parse_error}`")
+          if reasons:
+            lines.append("")
+            lines.append("## Reasons")
+            for reason in reasons:
+              lines.append(f"- {reason}")
+          Path("reports/human/web-audit-summary.md").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
+          print("true" if block else "false")
+          PY
+          )"
+          echo "block=$block" >> "$GITHUB_OUTPUT"
+
+      - name: Verify web DAST reports
+        if: always()
+        shell: bash
+        run: |
+          missing=0
+          for report in reports/human/zap-report.html reports/human/zap-report.md reports/llm/zap-report.json reports/human/web-audit-summary.md reports/llm/web-audit-summary.json; do
+            if [ ! -s "$report" ]; then
+              echo "::error title=Missing web audit report::Report '$report' is missing or empty."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload web DAST artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dast-${{ github.run_id }}
+          path: reports
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce web DAST policy
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.web_eval.outputs.block }}" = "true" ]; then
+            echo "Web DAST blocking policy triggered."
+            exit 1
           fi
 
   quality-gate:
     if: always()
     needs:
       - detect
+      - preflight-reports
       - trivy
       - python-ruff
       - python-test
+      - python-codeaudit
       - node-quality
+      - web-dast
     runs-on: ubuntu-latest
     steps:
       - name: Verify blocking jobs
         shell: bash
         env:
           DETECT_RESULT: ${{ needs.detect.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight-reports.result }}
           TRIVY_RESULT: ${{ needs.trivy.result }}
           PYTHON_RUFF_RESULT: ${{ needs.python-ruff.result }}
           PYTHON_TEST_RESULT: ${{ needs.python-test.result }}
+          PYTHON_CODEAUDIT_RESULT: ${{ needs.python-codeaudit.result }}
           NODE_QUALITY_RESULT: ${{ needs.node-quality.result }}
+          WEB_DAST_RESULT: ${{ needs.web-dast.result }}
         run: |
           failures=0
 
@@ -343,10 +1343,13 @@ jobs:
           }
 
           check_blocker detect "$DETECT_RESULT"
+          check_blocker preflight-reports "$PREFLIGHT_RESULT"
           check_blocker trivy "$TRIVY_RESULT"
           check_blocker python-ruff "$PYTHON_RUFF_RESULT"
           check_blocker python-test "$PYTHON_TEST_RESULT"
+          check_blocker python-codeaudit "$PYTHON_CODEAUDIT_RESULT"
           check_blocker node-quality "$NODE_QUALITY_RESULT"
+          check_blocker web-dast "$WEB_DAST_RESULT"
 
           if [ "$failures" -ne 0 ]; then
             echo "The quality gate failed."

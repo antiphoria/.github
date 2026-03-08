@@ -1,6 +1,6 @@
 {
   "name": "Antiphoria Quality Gate",
-  "description": "Calls the shared organization quality workflow for Trivy, Python, and Node or Astro checks.",
+  "description": "Calls the strict shared quality workflow for preflight evidence, Trivy, Python audits, Node or Astro checks, and web DAST.",
   "iconName": "octicon shield-check",
   "categories": [
     "Security",

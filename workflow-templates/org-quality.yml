@@ -13,4 +13,6 @@ jobs:
   quality-gate:
     uses: antiphoria/.github/.github/workflows/quality-gate.yml@main
     with:
-      policy-ref: main
+      policy_ref: main
+      strict_mode: true
+      require_local_preflight: true
