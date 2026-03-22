@@ -1,6 +1,6 @@
 {
   "name": "Antiphoria Quality Gate",
-  "description": "Calls the strict shared quality workflow for preflight evidence, Trivy, Python audits, Node or Astro checks, and web DAST.",
+  "description": "Calls the shared quality gate: Trivy, Ruff, Python tests, Node scripts, CodeAudit (advisory), Cursor handoff artifact, optional Trivy SARIF.",
   "iconName": "octicon shield-check",
   "categories": [
     "Security",
