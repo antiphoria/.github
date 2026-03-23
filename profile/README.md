@@ -32,6 +32,10 @@ Software and other materials published here are provided "AS IS", without warran
 
 Any use of these materials is at your own risk.
 
+## License
+
+Workflows, templates, and scripts in this repository are under the [MIT License](../LICENSE).
+
 ## Contact
 
 Georg Popp  
