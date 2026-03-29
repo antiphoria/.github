@@ -335,16 +335,12 @@ jobs:
         run: mkdir -p codeaudit-reports
 
       - name: Run CodeAudit overview
-        continue-on-error: true
+        continue-on-error: false
         run: codeaudit overview . codeaudit-reports/overview.html
 
       - name: Run CodeAudit filescan
-        continue-on-error: true
+        continue-on-error: false
         run: codeaudit filescan . codeaudit-reports/filescan.html
-
-      - name: Run CodeAudit modulescan
-        continue-on-error: true
-        run: codeaudit modulescan . codeaudit-reports/modulescan.html
 
       - name: Upload CodeAudit artifacts
         if: always()
