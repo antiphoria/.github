@@ -81,7 +81,7 @@ jobs:
       - name: Run Trivy JSON scan
         id: trivy_json
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -90,7 +90,7 @@ jobs:
 
       - name: Generate Trivy HTML report
         if: always()
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -177,7 +177,7 @@ jobs:
           path: .org-policy
 
       - name: Run Trivy SARIF (for GitHub code scanning)
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -279,6 +279,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python-version }}
+      
+      - name: Install system dependencies for OQS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgit2-dev pkg-config cmake ninja-build libssl-dev
 
       - name: Install project and dependencies
         shell: bash
